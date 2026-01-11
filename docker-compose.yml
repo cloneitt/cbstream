@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  cbstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cbstream
+    volumes:
+      - ./downloads:/cbstream
+      - ./downloads:/tmp/cbstream
+    stop_grace_period: 300s
+    stdin_open: true
+    tty: true
