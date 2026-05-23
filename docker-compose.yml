@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  cbstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./cbstream-data:/cbstream
+      - ./downloads:/tmp/cbstream
+    stop_grace_period: 300s
+    stdin_open: true
+    tty: true
+
+volumes:
+  external_disk:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "E:/Projects/cbstream-data"
