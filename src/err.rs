@@ -5,7 +5,13 @@ macro_rules! s {
     () => {
         |e| {
             let caller = panic::Location::caller();
-            format!("{}:({}:{}):{}", caller.file(), caller.line(), caller.column(), e)
+            format!(
+                "{}:({}:{}):{}",
+                caller.file(),
+                caller.line(),
+                caller.column(),
+                e
+            )
         }
     };
 }
@@ -15,7 +21,13 @@ macro_rules! e {
     () => {
         |e| {
             let caller = panic::Location::caller();
-            format!("{}:({}:{}):{:?}", caller.file(), caller.line(), caller.column(), e)
+            format!(
+                "{}:({}:{}):{:?}",
+                caller.file(),
+                caller.line(),
+                caller.column(),
+                e
+            )
         }
     };
 }
@@ -58,7 +70,7 @@ pub fn header_cast(e: Box<dyn Any + Send>) -> String {
 macro_rules! debug_eprintln {
     ($($arg:tt)*) => {
         if env::var("DEBUG").is_ok() {
-            println!($($arg)*);
+            eprintln!($($arg)*);
         }
     };
 }
