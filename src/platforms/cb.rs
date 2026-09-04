@@ -23,7 +23,7 @@ pub fn get_playlist(
     .map_err(s!())?;
     // get model playlist link
     let url = format!("https://chaturbate.com/api/chatvideocontext/{}/", username);
-    let json_raw = match util::get_retry(&url, 1, Some(&headers)) {
+    let mut json_raw = match util::get_retry(&url, 1, Some(&headers)) {
         Ok(r) => Ok::<String, Box<dyn error::Error>>(r),
         Err(e) => {
             if e.to_string().contains("Unauthorized") {
@@ -37,7 +37,16 @@ pub fn get_playlist(
         }
     }
     .map_err(s!())?;
-    let json: serde_json::Value = serde_json::from_str(&json_raw).map_err(e!())?;
+    let json: serde_json::Value = match serde_json::from_str(&json_raw).map_err(e!()) {
+        Ok(r) => r,
+        Err(e) => {
+            if !env::var("DEBUG").is_ok() {
+                json_raw.truncate(100);
+            }
+            let err = format!("{}: {}", e, json_raw);
+            return Err(err)?;
+        }
+    };
     let playlist_url = json
         .get("hls_source")
         .ok_or_else(o!())?
@@ -58,7 +67,7 @@ pub fn get_playlist(
             .captures(&playlist)
             .and_then(|c| Some(c.get(1)?.as_str()))
         {
-            let prefix = util::url_prefix(playlist_url, audio_uri).ok_or_else(o!())?;
+            let prefix = util::url_prefix(playlist_url, false).ok_or_else(o!())?;
             Some(format!("{}{}", prefix, audio_uri))
         } else {
             None
@@ -77,7 +86,7 @@ pub fn get_playlist(
         };
         let playlist_url = Some(format!(
             "{}{}{}",
-            util::url_prefix(playlist_url, line).ok_or_else(o!())?,
+            util::url_prefix(playlist_url, false).ok_or_else(o!())?,
             space,
             line
         ));
@@ -87,52 +96,40 @@ pub fn get_playlist(
 }
 // parse legacy playlist
 pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream>> {
-    if playlist.playlist_audio_url.is_some() {
-        return combine_playlist_audio_video(playlist);
-    }
-    let mut streams = Vec::new();
-    let mut date: Option<String> = None;
-    for line in (playlist.playlist.as_ref()).ok_or_else(o!())?.lines() {
-        // parse date and time
-        if date.is_none() {
-            if let Some(n) = line.find("TIME") {
-                if line.len() < 21 {
-                    return Err("error parsing date from playlist")?;
-                }
-                let t = (&line.get(n + 7..n + 21).ok_or_else(o!())?)
-                    .replace(":", "-")
-                    .replace("T", "_");
-                date = Some(t);
-            }
-        }
-        if line.len() == 0 || &line[..1] == "#" {
-            continue;
-        }
-        let full_url = format!(
-            "{}/{}",
-            util::url_prefix(&playlist.playlist_url, line).ok_or_else(o!())?,
-            line
-        );
-        // parse stream id
-        let id = line.split("_").last().ok_or_else(o!())?;
-        let n = id.find(".").ok_or_else(o!())?;
-        let id = (&id[..n]).trim().parse::<u32>().map_err(e!())?;
-        // parse filenames
-        let date = date.as_ref().ok_or_else(o!())?;
-        let filename = format!("CB_{}_{}", playlist.username, date);
-        streams.push(stream::Stream::new(
-            &filename,
-            &full_url,
-            None,
-            id,
-            Platform::CB,
-            playlist.settings.user_agent.clone(),
-            None,
-            None,
-        ));
-    }
-
-    Ok(streams)
+    //if playlist.playlist_audio_url.is_some() {
+    return combine_playlist_audio_video(playlist);
+    //}
+    //// legacy ts streams, disabling before removal
+    //let mut streams = Vec::new();
+    //for line in (playlist.playlist.as_ref()).ok_or_else(o!())?.lines() {
+    //    if line.len() == 0 || &line[..1] == "#" {
+    //        continue;
+    //    }
+    //    let full_url = format!(
+    //        "{}/{}",
+    //        util::url_prefix(&playlist.playlist_url, false).ok_or_else(o!())?,
+    //        line
+    //    );
+    //    // parse stream id
+    //    let id = line.split("_").last().ok_or_else(o!())?;
+    //    let n = id.find(".").ok_or_else(o!())?;
+    //    let id = (&id[..n]).trim().parse::<u32>().map_err(e!())?;
+    //    // parse filenames
+    //    let date = util::date();
+    //    let filename = format!("CB_{}_{}", playlist.username, date);
+    //    streams.push(stream::Stream::new(
+    //        &filename,
+    //        &full_url,
+    //        None,
+    //        id,
+    //        Platform::CB,
+    //        playlist.settings.user_agent.clone(),
+    //        None,
+    //        None,
+    //    ));
+    //}
+    //
+    //Ok(streams)
 }
 fn combine_playlist_audio_video(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream>> {
     let mut streams = Vec::new();
@@ -167,7 +164,6 @@ fn parse_playlist_audio_video(
     playlist: &mut stream::Playlist,
     audio: bool,
 ) -> Res<HashMap<u32, Info>> {
-    let mut date: Option<String> = None;
     let mut streams: HashMap<u32, Info> = HashMap::new();
     let playlist_text = if audio {
         playlist.playlist_audio.as_ref().ok_or_else(o!())?
@@ -195,7 +191,7 @@ fn parse_playlist_audio_video(
                 }
                 let header_url = format!(
                     "{}{}",
-                    util::url_prefix(playlist_url, header_url_split[1]).ok_or_else(o!())?,
+                    util::url_prefix(playlist_url, false).ok_or_else(o!())?,
                     header_url_split[1]
                 );
                 let http_headers = util::create_headers(serde_json::json!({
@@ -209,24 +205,12 @@ fn parse_playlist_audio_video(
                 *playlist_mp4_header = Some(sync::Arc::new(header))
             }
         }
-        // parse date and time
-        if date.is_none() {
-            if let Some(n) = line.find("TIME") {
-                if line.len() < 21 {
-                    return Err("error parsing date from playlist")?;
-                }
-                let t = (&line.get(n + 7..n + 21).ok_or_else(o!())?)
-                    .replace(":", "-")
-                    .replace("T", "_");
-                date = Some(t);
-            }
-        }
         if line.len() == 0 || &line[..1] == "#" {
             continue;
         }
         let full_url = format!(
             "{}{}",
-            util::url_prefix(&playlist.playlist_url, line).ok_or_else(o!())?,
+            util::url_prefix(&playlist.playlist_url, false).ok_or_else(o!())?,
             line
         );
         // parse stream id
@@ -239,7 +223,7 @@ fn parse_playlist_audio_video(
         let id2 = id.get(2).ok_or_else(o!())?;
         let id = id2.trim().parse::<u32>().map_err(e!())?;
         // parse filenames
-        let date = date.as_ref().ok_or_else(o!())?;
+        let date = util::date();
         let filename = format!("CB_{}_{}", playlist.username, date);
         let stream = Info {
             url: full_url,

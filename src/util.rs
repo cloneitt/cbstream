@@ -142,7 +142,7 @@ pub fn create_headers(json_map: serde_json::Value) -> Res<HashMap<String, String
 }
 /// returns current date and time in "24-02-29_23-12" format
 pub fn date() -> String {
-    let now = chrono::Local::now();
+    let now = chrono::Utc::now();
     now.format("%y-%m-%d_%H-%M").to_string()
 }
 /// returns current hour and miniute appended together
@@ -185,8 +185,8 @@ pub fn create_dir(dir: impl AsRef<Path>) -> Res<()> {
     .map_err(e!())?;
     Ok(())
 }
-pub fn url_prefix<'a>(url: &'a str, suffix: &str) -> Option<&'a str> {
-    if suffix.contains("/") {
+pub fn url_prefix<'a>(url: &'a str, end: bool) -> Option<&'a str> {
+    if !end {
         let start_slashs = url.find("://")? + 3;
         let n = url.get(start_slashs..)?.find("/")?;
         url.get(..n + start_slashs)
@@ -207,7 +207,7 @@ pub struct ManagedFile {
 }
 fn create_valid_path(path: &Path) -> Res<PathBuf> {
     let mut path = path.to_path_buf();
-    if path.exists() {
+    while path.exists() {
         let stem = path.file_stem().ok_or_else(o!())?.to_string_lossy();
         let ext = path.extension().ok_or_else(o!())?.to_string_lossy();
         path.set_file_name(format!("{}-.{}", stem, ext));

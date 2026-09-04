@@ -17,8 +17,17 @@ pub fn get_playlist(
         "https://api-edge.myfreecams.com/usernameLookup/{}",
         username
     );
-    let json_raw = util::get_retry(&url, 5, Some(&headers)).map_err(s!())?;
-    let json: serde_json::Value = serde_json::from_str(&json_raw).map_err(e!())?;
+    let mut json_raw = util::get_retry(&url, 5, Some(&headers)).map_err(s!())?;
+    let json: serde_json::Value = match serde_json::from_str(&json_raw).map_err(e!()) {
+        Ok(r) => r,
+        Err(e) => {
+            if !env::var("DEBUG").is_ok() {
+                json_raw.truncate(100);
+            }
+            let err = format!("{}: {}", e, json_raw);
+            return Err(err)?;
+        }
+    };
     let user = json
         .get("result")
         .ok_or_else(o!())?
@@ -67,7 +76,7 @@ pub fn get_playlist(
         }
         let playlist_link = format!(
             "{}/{}",
-            util::url_prefix(&playlist_url, line).ok_or_else(o!())?,
+            util::url_prefix(&playlist_url, true).ok_or_else(o!())?,
             line
         );
         return Ok((Some(playlist_link), None));
@@ -83,7 +92,7 @@ pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream
         // parse relevant information
         let url = format!(
             "{}/{}",
-            util::url_prefix(&playlist.playlist_url, line).ok_or_else(o!())?,
+            util::url_prefix(&playlist.playlist_url, true).ok_or_else(o!())?,
             line
         );
         // parse stream id

@@ -22,9 +22,29 @@ pub fn get_playlist(
     let html = util::get_retry(&url, 1, Some(&headers)).map_err(s!())?;
     let re: &Arc<regex::Regex> =
         REGEX_GET.get_or_init(|| regex::Regex::new(r#""stream":[^\}]+\}"#).unwrap().into());
-    let json_string = re.find(&html).ok_or_else(o!())?.as_str();
+    let mut json_string: Option<&str> = None;
+    for matches in re.find_iter(&html) {
+        let m = matches.as_str();
+        if m.contains("edge_servers") {
+            json_string = Some(m);
+        }
+    }
+    if json_string == None {
+        return Err("regex match: html parsing error").map_err(s!())?;
+    }
+    let json_string = json_string.ok_or_else(o!())?;
     let json: serde_json::Value =
-        serde_json::from_str(&format!("{{{}}}", json_string)).map_err(e!())?;
+        match serde_json::from_str(&format!("{{{}}}", json_string)).map_err(e!()) {
+            Ok(r) => r,
+            Err(e) => {
+                let mut json_raw = json_string.to_string();
+                if !env::var("DEBUG").is_ok() {
+                    json_raw.truncate(100);
+                }
+                let err = format!("{}: {}", e, json_raw);
+                return Err(err)?;
+            }
+        };
     let json = json.get("stream").ok_or_else(o!())?;
     let hostname_array = json
         .get("edge_servers")
@@ -62,7 +82,6 @@ pub fn get_playlist(
 static REGEX_PARSE: OnceLock<Arc<regex::Regex>> = OnceLock::new();
 pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream>> {
     let mut streams = Vec::new();
-    let mut date: Option<String> = None;
     for line in (playlist.playlist.as_ref()).ok_or_else(o!())?.lines() {
         // parse MP4 header
         if playlist.mp4_header.is_none() {
@@ -74,8 +93,7 @@ pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream
                 }
                 let header_url = format!(
                     "{}/{}",
-                    util::url_prefix(&playlist.playlist_url, header_url_split[1])
-                        .ok_or_else(o!())?,
+                    util::url_prefix(&playlist.playlist_url, true).ok_or_else(o!())?,
                     header_url_split[1]
                 );
                 let http_headers = util::create_headers(serde_json::json!({
@@ -87,18 +105,6 @@ pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream
                 let header =
                     util::get_retry_vec(&header_url, 5, Some(&http_headers)).map_err(s!())?;
                 playlist.mp4_header = Some(sync::Arc::new(header))
-            }
-        }
-        // parse date and time
-        if date.is_none() {
-            if let Some(n) = line.find("TIME") {
-                if line.len() < 21 {
-                    return Err("error parsing date from playlist")?;
-                }
-                let t = (&line.get(n + 7..n + 21).ok_or_else(o!())?)
-                    .replace(":", "-")
-                    .replace("T", "_");
-                date = Some(t);
             }
         }
         if line.len() == 0 || &line[..1] == "#" {
@@ -115,7 +121,7 @@ pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream
             .parse::<u32>()
             .map_err(e!())?;
         // parse filenames
-        let date = date.as_ref().ok_or_else(o!())?;
+        let date = util::date();
         let filename = format!("CS_{}_{}", playlist.username, date);
         streams.push(stream::Stream::new(
             &filename,
