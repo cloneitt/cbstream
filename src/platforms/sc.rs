@@ -1,21 +1,28 @@
-use crate::{e, o, platforms::Platform, s, stream, util};
+use crate::{config::Settings, e, o, platforms::Platform, s, stream, util};
 use std::{
     sync::{Arc, OnceLock},
     *,
 };
 type Result<T> = result::Result<T, Box<dyn error::Error>>;
 #[inline]
-pub fn get_playlist(username: &str) -> Result<(Option<String>, Option<String>)> {
-    sc_get_playlist(username, false)
+pub fn get_playlist(
+    username: &str,
+    settings: Arc<Settings>,
+) -> Result<(Option<String>, Option<String>)> {
+    sc_get_playlist(username, false, settings)
 }
 #[inline]
 pub fn parse_playlist(playlist: &mut stream::Playlist) -> Result<Vec<stream::Stream>> {
     sc_parse_playlist(playlist, false)
 }
-pub fn sc_get_playlist(username: &str, vr: bool) -> Result<(Option<String>, Option<String>)> {
+pub fn sc_get_playlist(
+    username: &str,
+    vr: bool,
+    settings: Arc<Settings>,
+) -> Result<(Option<String>, Option<String>)> {
     let platform = if vr { Platform::SCVR } else { Platform::SC };
     let headers = util::create_headers(serde_json::json!({
-        "user-agent": util::get_useragent().map_err(s!())?,
+        "user-agent": &settings.user_agent,
         "referer": format!("{}{}",platform.referer(),username),
         "accept": "application/json, text/plain, */*",
         "accept-language": "en-US,en;q=0.9",
@@ -106,7 +113,7 @@ pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Result<Ve
                 }
                 let header_url = header_url_split[1];
                 let http_headers = util::create_headers(serde_json::json!({
-                    "user-agent": util::get_useragent().map_err(s!())?,
+                    "user-agent": &playlist.settings.user_agent,
                     "referer": platform.referer(),
 
                 }))
@@ -174,17 +181,15 @@ pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Result<Ve
         let vr_str = if vr { "SCVR" } else { "SC" };
         let date = date.as_ref().ok_or_else(o!())?;
         let filename = format!("{}_{}_{}", vr_str, playlist.username, date);
-        let mut filepath = path::PathBuf::from(&temp_dir);
-        filepath.push(format!("{}-{}-{}-{}.mp4", vr_str.to_lowercase(), playlist.username, date, id));
         streams.push(stream::Stream::new(
             &filename,
             &url,
             None,
             id,
-            &filepath,
+            platform.clone(),
+            playlist.settings.user_agent.clone(),
             playlist.mp4_header.clone(),
             None,
-            platform.clone(),
         ));
     }
     Ok(streams)
