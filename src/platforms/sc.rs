@@ -1,94 +1,46 @@
-use {
-    crate::{
-        config::Settings,
-        debug_eprintln, e, o,
-        platforms::Platform,
-        s, stream,
-        util::{self},
-    },
-    std::{
-        collections::HashMap,
-        sync::{Arc, OnceLock},
-        *,
-    },
+use crate::{e, o, platforms::Platform, s, stream, util};
+use std::{
+    sync::{Arc, OnceLock},
+    *,
 };
-type Res<T> = Result<T, Box<dyn error::Error>>;
+type Result<T> = result::Result<T, Box<dyn error::Error>>;
 #[inline]
-pub fn get_playlist(
-    username: &str,
-    settings: Arc<Settings>,
-) -> Res<(Option<String>, Option<String>)> {
-    sc_get_playlist(username, false, settings)
+pub fn get_playlist(username: &str) -> Result<(Option<String>, Option<String>)> {
+    sc_get_playlist(username, false)
 }
 #[inline]
-pub fn parse_playlist(playlist: &mut stream::Playlist) -> Res<Vec<stream::Stream>> {
+pub fn parse_playlist(playlist: &mut stream::Playlist) -> Result<Vec<stream::Stream>> {
     sc_parse_playlist(playlist, false)
 }
-static REGEX_HTML_PARSE: OnceLock<Arc<regex::Regex>> = OnceLock::new();
-pub fn sc_get_playlist(
-    username: &str,
-    vr: bool,
-    settings: Arc<Settings>,
-) -> Res<(Option<String>, Option<String>)> {
+pub fn sc_get_playlist(username: &str, vr: bool) -> Result<(Option<String>, Option<String>)> {
     let platform = if vr { Platform::SCVR } else { Platform::SC };
     let headers = util::create_headers(serde_json::json!({
-        "user-agent": &settings.user_agent,
+        "user-agent": util::get_useragent().map_err(s!())?,
         "referer": format!("{}{}",platform.referer(),username),
-        "accept": "text/html",
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "en-US,en;q=0.9",
+        "origin": "https://strip.chat",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+
     }))
     .map_err(s!())?;
-    // get json embeded in html
-    let url = format!("https://stripchat.com/{}", username);
-    let raw_html = util::get_retry(&url, 5, Some(&headers)).map_err(s!())?;
-    let re: &Arc<regex::Regex> = REGEX_HTML_PARSE.get_or_init(|| {
-        regex::Regex::new(
-            r#"<script>\n?\s*?window.__PRELOADED_STATE__\s?=\s?(\{([^>]|\n)+)</script>"#,
-        )
-        .unwrap()
-        .into()
-    });
-    let json_raw = re
-        .captures(&raw_html)
-        .and_then(|cap| cap.get(1))
-        .map(|s| s.as_str())
-        .ok_or_else(o!())?;
+    // get model ID
+    let url = format!("https://hu.strip.chat/api/front/users/user-ids/{}", username);
+    let json_raw = util::get_retry(&url, 5, Some(&headers)).map_err(s!())?;
     let json: serde_json::Value = serde_json::from_str(&json_raw).map_err(e!())?;
-    // get model id
-    let model_id = json
-        .get("viewCam")
-        .and_then(|v| v.get("model"))
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_i64())
-        .ok_or_else(o!())?;
-    // get hls url prefix
-    let hls_stream_template = json
-        .get("configV3")
-        .and_then(|v| v.get("initialCommon"))
-        .and_then(|v| v.get("hlsStreamUrlTemplate"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(o!())?;
-    let default_hls_host = json
-        .get("configV3")
-        .and_then(|v| v.get("initialCommon"))
-        .and_then(|v| v.get("defaultHlsStreamHost"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(o!())?;
-    let t = hls_stream_template.find(".").ok_or_else(o!())?;
-    let hls_prefix = format!("{}.{}", &hls_stream_template[..t], default_hls_host);
+    let model_id = json["id"].as_i64().ok_or_else(o!())?;
     // get largest HLS stream
     let vr = if vr { "_vr" } else { "" };
+    let auto = if vr.is_empty() { "_auto" } else { "" };
     let playlist_url = format!(
-        "{}/hls/{}{}/master/{}{}.m3u8",
-        hls_prefix, model_id, vr, model_id, vr
+        "https://edge-hls.doppiocdn.org/hls/{}{}/master/{}{}{}.m3u8",
+        model_id, vr, model_id, vr, auto
     );
-    // below is the transoded streams, (maybe add resolution settings in future)
-    //let playlist_url = format!("{}/hls/{}_vr/master/{}_vr_auto.m3u8", hls_prefix, model_id, model_id);
     let playlist = match util::get_retry(&playlist_url, 1, Some(&headers)).map_err(s!()) {
         Ok(r) => r,
-        Err(e) => {
-            debug_eprintln!("{}", e);
-            return Ok((None, None));
-        }
+        Err(_) => return Ok((None, None)),
     };
     let mut playlist_url = None;
     for line in playlist.lines() {
@@ -103,13 +55,13 @@ pub fn sc_get_playlist(
                 continue;
             }
             let segments: Vec<&str> = line.split(":").collect();
-            let psch_ver = segments.get(2).ok_or_else(o!())?;
+            let psch = segments.get(2).ok_or_else(o!())?;
             let pkey = segments.get(3).ok_or_else(o!())?;
-            if !psch(&settings.user_agent).contains_key(*pkey) {
+            if !PSCH.contains_key(*pkey) {
                 continue;
             }
             if let Some(url) = playlist_url {
-                let playlist_url_append = format!("{}?&psch={}&pkey={}", url, psch_ver, pkey);
+                let playlist_url_append = format!("{}?&psch={}&pkey={}", url, psch, pkey);
                 playlist_url = Some(playlist_url_append);
                 break;
             }
@@ -118,28 +70,30 @@ pub fn sc_get_playlist(
     return Ok((playlist_url, None));
 }
 
-pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Res<Vec<stream::Stream>> {
+static PSCH: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "Zokee2OhPh9kugh4" => "Quean4cai9boJa5a",
+    "Ook7quaiNgiyuhai" => "EQueeGh2kaewa3ch",
+    "Zeechoej4aleeshi" => "ubahjae7goPoodi6",
+    "Fq6m2TO2ZeBkRPm9" => "xb6di1NF9EFXHUwb",
+    "GrRncsoByZmsiT6L" => "NigHYyOD9l4rvAEb",
+};
+
+static REGEX_ENCRY_TERM: OnceLock<Arc<regex::Regex>> = OnceLock::new();
+
+pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Result<Vec<stream::Stream>> {
     let platform = if vr { Platform::SCVR } else { Platform::SC };
+    let temp_dir = util::temp_dir().map_err(s!())?;
+    util::create_dir(&temp_dir).map_err(s!())?;
     let mut streams = Vec::new();
-    let mut key: Option<String> = None;
-    let enumerated_lines: Vec<(usize, &str)> = playlist
-        .playlist
-        .as_ref()
-        .ok_or_else(o!())?
-        .lines()
-        .enumerate()
-        .collect();
-    for (line_number, line) in &enumerated_lines {
+    let mut date: Option<String> = None;
+    let mut key: Option<&str> = None;
+    let iter: Vec<(usize, &str)> = playlist.playlist.as_ref().ok_or_else(o!())?.lines().enumerate().collect();
+    for (n, line) in &iter {
         // get m3u8 encryption key
         if key.is_none() {
             if line.contains("#EXT-X-MOUFLON:PSCH") {
-                let line_segments: Vec<&str> = line.split(":").collect();
-                let k = *(line_segments.get(3).ok_or_else(o!())?);
-                let v = psch(&playlist.settings.user_agent)
-                    .get(k)
-                    .ok_or_else(o!())?
-                    .clone();
-                key = Some(v);
+                let segments: Vec<&str> = line.split(":").collect();
+                key = Some(*PSCH.get(*(segments.get(3).ok_or_else(o!())?)).ok_or_else(o!())?)
             }
         }
         // parse MP4 header
@@ -152,14 +106,23 @@ pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Res<Vec<s
                 }
                 let header_url = header_url_split[1];
                 let http_headers = util::create_headers(serde_json::json!({
-                    "user-agent": &playlist.settings.user_agent,
+                    "user-agent": util::get_useragent().map_err(s!())?,
                     "referer": platform.referer(),
 
                 }))
                 .map_err(s!())?;
-                let header =
-                    util::get_retry_vec(header_url, 5, Some(&http_headers)).map_err(s!())?;
+                let header = util::get_retry_vec(header_url, 5, Some(&http_headers)).map_err(s!())?;
                 playlist.mp4_header = Some(sync::Arc::new(header))
+            }
+        }
+        // parse date and time from playlist
+        if date.is_none() {
+            if let Some(n) = line.find("TIME") {
+                if line.len() < 21 {
+                    return Err("error parsing date from playlist")?;
+                }
+                let t = (&line[n + 7..n + 21]).replace(":", "-").replace("T", "_");
+                date = Some(t);
             }
         }
         if line.len() == 0 || &line[..1] == "#" {
@@ -169,8 +132,39 @@ pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Res<Vec<s
         let url = if key.is_none() {
             line.to_string()
         } else {
-            let (_, mouflon_line) = &enumerated_lines[line_number.saturating_sub(1)];
-            decrypt(key.as_deref(), *mouflon_line).map_err(s!())?
+            //// ENCRYPTED FILENAME
+            // preprare key
+            let key_bytes = key.ok_or_else(o!())?.as_bytes();
+            use sha2::Digest;
+            let mut sha256_hasher = sha2::Sha256::new();
+            sha256_hasher.update(key_bytes);
+            let key_bytes = sha256_hasher.finalize().to_vec();
+            // preprare encrypted string
+            let (_, mouflon) = &iter[n.saturating_sub(1)];
+            let encoded_url = format!("https:{}", mouflon.split(":").last().ok_or_else(o!())?);
+            // use stripchat's REGEX pattern to get encrypted string
+            let re: &Arc<regex::Regex> =
+                REGEX_ENCRY_TERM.get_or_init(|| regex::Regex::new(r"_([^_]+)_(\d+(?:_part\d+)?)\.mp4(?:[?#].*)?").unwrap().into());
+            let re_captures = re.captures(&encoded_url).ok_or_else(o!())?;
+            let encrypted_str = re_captures.get(1).ok_or_else(o!())?.as_str().to_string();
+            // reverse string
+            let mut encrypted_str_rev: String = encrypted_str.chars().rev().collect();
+            if encrypted_str_rev.len() % 4 != 0 {
+                for _ in 0..(4 - (encrypted_str_rev.len() % 4)) {
+                    encrypted_str_rev.push('=');
+                }
+            }
+            use base64::{Engine, engine::general_purpose::STANDARD};
+            let mut encrypted_bytes = STANDARD.decode(encrypted_str_rev).map_err(e!())?;
+            // XOR Decrypt
+            let mut i = 0;
+            while i < encrypted_bytes.len() {
+                encrypted_bytes[i] = encrypted_bytes[i] ^ key_bytes[i % key_bytes.len()];
+                i += 1;
+            }
+            let decrypted_str = String::from_utf8_lossy(&encrypted_bytes);
+            // decrypted output
+            encoded_url.replace(&encrypted_str, &decrypted_str)
         };
         // parse stream id
         let id = url.split("_").last().ok_or_else(o!())?;
@@ -178,90 +172,20 @@ pub fn sc_parse_playlist(playlist: &mut stream::Playlist, vr: bool) -> Res<Vec<s
         let id = id[..n].trim().parse::<u32>().map_err(e!())?;
         // parse filename
         let vr_str = if vr { "SCVR" } else { "SC" };
-        let date = util::date();
+        let date = date.as_ref().ok_or_else(o!())?;
         let filename = format!("{}_{}_{}", vr_str, playlist.username, date);
+        let mut filepath = path::PathBuf::from(&temp_dir);
+        filepath.push(format!("{}-{}-{}-{}.mp4", vr_str.to_lowercase(), playlist.username, date, id));
         streams.push(stream::Stream::new(
             &filename,
             &url,
             None,
             id,
-            platform.clone(),
-            playlist.settings.user_agent.clone(),
+            &filepath,
             playlist.mp4_header.clone(),
             None,
+            platform.clone(),
         ));
     }
     Ok(streams)
-}
-
-static PSCH_REF: phf::Map<&'static str, &'static str> = phf::phf_map! {
-    "Zokee2OhPh9kugh4" => "Quean4cai9boJa5a",
-    "Zeechoej4aleeshi" => "ubahjae7goPoodi6",
-    "Ook7quaiNgiyuhai" => "EQueeGh2kaewa3ch",
-    "Fq6m2TO2ZeBkRPm9" => "xb6di1NF9EFXHUwb",
-    "GrRncsoByZmsiT6L" => "NigHYyOD9l4rvAEb",
-    "1Dzcc6OjP73LKbtI" => "Y64UVwX5RrIWnOLp",
-    "N2oLovTIXb0o28Uj" => "ABE7Sj8jh3oPM2ae",
-    "NTK9aqcLmNFMWrpQ" => "tOcYOap4Ty1l9Jzb",
-    "7uUnbD0jMCB9GH32" => "lzCQ6QBTnLpB0zMF",
-    "Ohi7eTRBpkAuML0l" => "kExe29N2sLFrHGqu",
-    "OLzu7QlySkG2fVRn" => "CsovScFH9VirSJ4Z",
-};
-
-static PSCH: OnceLock<Arc<HashMap<String, String>>> = OnceLock::new();
-
-fn psch(useragent: &str) -> Arc<HashMap<String, String>> {
-    PSCH.get_or_init(|| {
-        let headers = util::create_headers(serde_json::json!({
-        "user-agent": useragent,
-    })).unwrap_or_default();
-    let map = util::get_retry(
-        "https://raw.githubusercontent.com/kesamom/stripchat_mouflon/refs/heads/main/stripchat_mouflon_keys.json",
-        1,
-        Some(&headers)
-    ).ok()
-    .and_then(|json_raw|serde_json::from_str::<HashMap<String,String>>(&json_raw).ok())
-    .unwrap_or_else(||PSCH_REF.entries().map(|(k,v)|(k.to_string(),v.to_string())).collect());
-    Arc::new(map)
-    }).clone()
-}
-
-static REGEX_ENCRY_TERM: OnceLock<Arc<regex::Regex>> = OnceLock::new();
-//// ENCRYPTED FILENAME
-fn decrypt(key: Option<&str>, mouflon_line: &str) -> Res<String> {
-    // preprare key
-    let key_bytes = key.ok_or_else(o!())?.as_bytes();
-    use sha2::Digest;
-    let mut sha256_hasher = sha2::Sha256::new();
-    sha256_hasher.update(key_bytes);
-    let key_hashed = sha256_hasher.finalize().to_vec();
-    // preprare encrypted string
-    let encoded_url = format!("https:{}", mouflon_line.split(":").last().ok_or_else(o!())?);
-    // use stripchat's REGEX pattern to get encrypted string
-    let re: &Arc<regex::Regex> = REGEX_ENCRY_TERM.get_or_init(|| {
-        regex::Regex::new(r"_([^_]+)_(\d+(?:_part\d+)?)\.mp4(?:[?#].*)?")
-            .unwrap()
-            .into()
-    });
-    let re_captures = re.captures(&encoded_url).ok_or_else(o!())?;
-    let encrypted_str = re_captures.get(1).ok_or_else(o!())?.as_str().to_string();
-    // reverse string
-    let mut encrypted_str_rev: String = encrypted_str.chars().rev().collect();
-    // pad base64
-    if encrypted_str_rev.len() % 4 != 0 {
-        for _ in 0..(4 - (encrypted_str_rev.len() % 4)) {
-            encrypted_str_rev.push('=');
-        }
-    }
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let mut encrypted_bytes = STANDARD.decode(encrypted_str_rev).map_err(e!())?;
-    // XOR Decrypt
-    let mut i = 0;
-    while i < encrypted_bytes.len() {
-        encrypted_bytes[i] = encrypted_bytes[i] ^ key_hashed[i % key_hashed.len()];
-        i += 1;
-    }
-    let decrypted_str = String::from_utf8_lossy(&encrypted_bytes);
-    // decrypted output
-    Ok(encoded_url.replace(&encrypted_str, &decrypted_str))
 }
