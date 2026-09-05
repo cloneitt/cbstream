@@ -41,21 +41,62 @@ pub fn sc_get_playlist(
     // get largest HLS stream
     let vr = if vr { "_vr" } else { "" };
     let auto = if vr.is_empty() { "_auto" } else { "" };
-    let playlist_url = format!(
+    let master_playlist_url = format!(
         "https://edge-hls.doppiocdn.org/hls/{}{}/master/{}{}{}.m3u8",
         model_id, vr, model_id, vr, auto
     );
-    let playlist = match util::get_retry(&playlist_url, 1, Some(&headers)).map_err(s!()) {
+    let playlist = match util::get_retry(&master_playlist_url, 1, Some(&headers)).map_err(s!()) {
         Ok(r) => r,
         Err(_) => return Ok((None, None)),
     };
-    let mut playlist_url = None;
+    let mut selected_playlist_url: Option<(u64, u64, u64, String)> = None;
+    let mut variant_quality = (0, 0, 0);
+    let mut has_variants = false;
     for line in playlist.lines() {
-        if line.len() < 5 || &line[..1] == "#" {
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            has_variants = true;
+            let mut height = 0;
+            let mut width = 0;
+            let mut bandwidth = 0;
+            for attribute in line["#EXT-X-STREAM-INF:".len()..].split(',') {
+                if let Some(resolution) = attribute.strip_prefix("RESOLUTION=") {
+                    if let Some((w, h)) = resolution.split_once('x') {
+                        width = w.parse().unwrap_or(0);
+                        height = h.parse().unwrap_or(0);
+                    }
+                } else if let Some(value) = attribute.strip_prefix("BANDWIDTH=") {
+                    bandwidth = value.parse().unwrap_or(0);
+                }
+            }
+            variant_quality = (height, width, bandwidth);
             continue;
         }
-        playlist_url = Some(line.to_string());
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line_url = if line.starts_with("http://") || line.starts_with("https://") {
+            line.to_string()
+        } else {
+            format!(
+                "{}/{}",
+                util::url_prefix(&master_playlist_url, true).ok_or_else(o!())?,
+                line
+            )
+        };
+        if !has_variants
+            || selected_playlist_url
+                .as_ref()
+                .map_or(true, |selected| variant_quality > (selected.0, selected.1, selected.2))
+        {
+            selected_playlist_url = Some((
+                variant_quality.0,
+                variant_quality.1,
+                variant_quality.2,
+                line_url,
+            ));
+        }
     }
+    let mut playlist_url = selected_playlist_url.map(|selected| selected.3);
     if playlist.contains("EXT-X-MOUFLON") {
         for line in playlist.lines() {
             if !line.contains("EXT-X-MOUFLON") {
